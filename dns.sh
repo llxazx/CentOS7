@@ -87,7 +87,7 @@ arDdnsCheck "xxxx.com" "www"
 # arMail="自己的DNSPOD用户名" 
 # arPass="自己的DNSPOD密码" 
 # 检查更新域名
-# arDdnsCheck"顶级域名" "二级域名前缀" //需要更新的域名为anrip.com，主机为lab，就是lab.anrip.com arDdnsCheck"anrip.net" "lab" 
+# arDdnsCheck"顶级域名" "二级域名前缀" //需要更新的域名为anrip.com，主机为lab，就是lab.anrip.com
 # 修改成自己的信息即可
 
 ############        安装支持     ###########
