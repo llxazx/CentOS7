@@ -89,6 +89,7 @@ arDdnsCheck "xxxx.com" "www"
 # 检查更新域名
 # arDdnsCheck"顶级域名" "二级域名前缀" //需要更新的域名为anrip.com，主机为lab，就是lab.anrip.com
 # 修改成自己的信息即可
+# 在源代码的基础上修改了第24行代码修复了一个错误。
 
 ############        安装支持     ###########
 #### yum -y install bind-utils
