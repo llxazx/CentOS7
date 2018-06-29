@@ -1,0 +1,568 @@
+#!/bin/bash
+#
+# seafile-server-installer/seafile-server-centos-7-amd64
+#
+# Copyright 2015, Alexander Jackson <alexander.jackson@seafile.de>
+#
+# This program is free software: you can redistribute it and/or modify
+# it under the terms of the GNU Affero General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# This program is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU Affero General Public License for more details.
+#
+# You should have received a copy of the GNU Affero General Public License
+# along with this program.  If not, see <http://www.gnu.org/licenses/>.
+#
+#
+
+if [[ $HOME == "" ]]; then
+    export HOME=/root
+fi
+
+if [[ $SEAFILE_DEBUG != "" ]]; then
+    set -x
+fi
+set -e
+
+if [[ "$#" -ne 1 ]]; then
+    echo "您必须输入要安装的 Seafile 版本"
+    echo "例如: $0 6.2.13"
+    exit 1
+fi
+
+clear
+cat <<EOF
+
+     ★★★ 这个是 seafile服务器 CentOS 7 64bit 的安装脚本 ★★★
+  ★★★  -新的seafile服务器版本，MariaDB，Memcached Nginx—   ★★★
+ ----------------------------------------------------------------------
+
+  这个程序只能运行在一个全新安装的系统。如果您运行在已有服务的服务器上，
+  可能会发生可怕的错误，你将失去有价值的数据！
+
+  如有问题或建议，请与我们联系  support@seafile.com
+
+ ----------------------------------------------------------------------
+
+  可用的选择：
+          ★★★★★★★   1 = Seafile 免费社区版安装   ★★★★★★★
+          ★★★★★★★   2 = Seafile 企业专业版安装   ★★★★★★★
+
+EOF
+
+if [[ ${SEAFILE_PRO} == "" ]]; then
+    PS3="选择要安装的 Seafile 版本? "
+     select SEAFILE_SERVER_VERSION in 安装社区版 安装专业版 终止并退出; do
+        case "${SEAFILE_SERVER_VERSION}" in
+            终止并退出)
+                echo "终止安装退出脚本"
+                exit 1
+                break
+                ;;
+            "")
+                echo "$REPLY: 错误的选项。选择1或2。"
+                ;;
+            *)
+                if [[ ${SEAFILE_SERVER_VERSION} = "安装专业版" ]]; then
+                    SEAFILE_PRO=1
+                else
+                    SEAFILE_PRO=0
+                fi
+                break
+        esac
+    done
+fi
+
+is_pro() {
+    if [[ "$SEAFILE_PRO" == "1" ]]; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+echo
+if is_pro; then
+    echo "此脚本将为您安装 Seafile 专业版。"
+else
+    echo "此脚本将为您安装 Seafile 社区版。"
+fi
+echo
+
+# -------------------------------------------
+# 变量
+# -------------------------------------------
+SEAFILE_ADMIN=admin@seafile.local
+IP_OR_DOMAIN=127.0.0.1
+SEAFILE_VERSION=$1
+TIME_ZONE=Asia/Shanghai
+
+if is_pro; then
+    SEAFILE_SERVER_PACKAGE=seafile-pro-server_${SEAFILE_VERSION}_x86-64.tar.gz
+    if [[ ! -e /opt/$SEAFILE_SERVER_PACKAGE ]]; then
+        echo
+        echo "在运行此脚本之前，必须将  \"$SEAFILE_SERVER_PACKAGE\"  程序包”下载到 /opt/ 文件夹中！"
+        echo
+        exit 1
+    fi
+    INSTALLPATH=/opt/seafile/seafile-pro-server-${SEAFILE_VERSION}/
+else
+    SEAFILE_SERVER_PACKAGE=seafile-server_${SEAFILE_VERSION}_x86-64.tar.gz
+    SEAFILE_SERVER_PACKAGE_URL=http://seafile-downloads.oss-cn-shanghai.aliyuncs.com/${SEAFILE_SERVER_PACKAGE}
+    INSTALLPATH=/opt/seafile/seafile-server-${SEAFILE_VERSION}/
+fi
+
+
+# -------------------------------------------
+#    确保我们以根目录运行安装脚本
+# -------------------------------------------
+if [[ $EUID -ne 0 ]]; then
+  echo " 不是根目录，终止安装脚本运行。" ; exit 1
+fi
+
+
+# -------------------------------------------
+# 如果目录 /opt/seafile/ 存在
+# -------------------------------------------
+if [[ -d "/opt/seafile/" ]] ;
+then
+  echo "  因为目录 /opt/seafile/ 已经存在而中止。 " ; exit 1
+fi
+
+# -------------------------------------------
+# 设置许可 SELinux
+# -------------------------------------------
+# runtime
+enforce=`getenforce`
+if [[ "${enforce}" != "Disabled" ]]; then
+    setenforce 0
+fi
+# permanently
+sed -i 's/^SELINUX=.*/SELINUX=permissive/' /etc/selinux/config
+
+# -------------------------------------------
+# 设置 防火墙
+# -------------------------------------------
+yum install firewalld fail2ban -y
+# https://www.optimox.de/tutorials/linux-allgemein/centos-firewall-konfigurieren-mit-firewalld
+for i in ssh http https ; do firewall-cmd --zone=public --add-service=${i} --permanent ; done
+firewall-cmd --reload
+
+# -------------------------------------------
+# 安装 附加支持库
+# -------------------------------------------
+# extra packages for enterprise linux
+yum install epel-release -y
+yum upgrade -y
+yum install python-setuptools python-imaging MySQL-python memcached python-urllib3 \
+    pwgen curl openssl python-ldap java-1.7.0-openjdk poppler-utils libreoffice python-requests \
+    libreoffice-headless libreoffice-pyuno wqy-microhei-fonts wqy-zenhei-fonts wqy-unibit-fonts \
+    gcc libffi-devel python-devel openssl-devel libmemcached libmemcached-devel python2-pip -y
+pip install --upgrade pylibmc django-pylibmc
+
+# 在系统启动时启动缓存
+systemctl enable memcached
+
+# -------------------------------------------
+# 安装 nginx 网站服务
+# -------------------------------------------
+yum install nginx -y
+systemctl enable nginx
+rm -rf /etc/nginx/conf.d/*
+
+cat > /etc/nginx/conf.d/seafile.conf <<'EOF'
+server {
+    listen 80;
+    server_name seafile.example.com;
+
+    proxy_set_header X-Forwarded-For $remote_addr;
+
+    location / {
+         proxy_pass         http://127.0.0.1:8000;
+         proxy_set_header   Host $host;
+         proxy_set_header   X-Real-IP $remote_addr;
+         proxy_set_header   X-Forwarded-For $proxy_add_x_forwarded_for;
+         proxy_set_header   X-Forwarded-Host $server_name;
+         proxy_read_timeout  1200s;
+
+         # used for view/edit office file via Office Online Server
+         client_max_body_size 0;
+
+         access_log      /var/log/nginx/seahub.access.log;
+         error_log       /var/log/nginx/seahub.error.log;
+    }
+        
+    location /seafhttp {
+        rewrite ^/seafhttp(.*)$ $1 break;
+        proxy_pass http://127.0.0.1:8082;
+        client_max_body_size 0;
+        proxy_set_header   X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_connect_timeout  36000s;
+        proxy_read_timeout  36000s;
+    }
+    location /media {
+        root /opt/seafile/seafile-server-latest/seahub;
+    }
+    location /seafdav {
+        fastcgi_pass    127.0.0.1:8080;
+        fastcgi_param   SCRIPT_FILENAME     $document_root$fastcgi_script_name;
+        fastcgi_param   PATH_INFO           $fastcgi_script_name;
+        fastcgi_param   SERVER_PROTOCOL     $server_protocol;
+        fastcgi_param   QUERY_STRING        $query_string;
+        fastcgi_param   REQUEST_METHOD      $request_method;
+        fastcgi_param   CONTENT_TYPE        $content_type;
+        fastcgi_param   CONTENT_LENGTH      $content_length;
+        fastcgi_param   SERVER_ADDR         $server_addr;
+        fastcgi_param   SERVER_PORT         $server_port;
+        fastcgi_param   SERVER_NAME         $server_name;
+        fastcgi_param   REMOTE_ADDR         $remote_addr;
+
+        client_max_body_size 0;
+
+        access_log      /var/log/nginx/seafdav.access.log;
+        error_log       /var/log/nginx/seafdav.error.log;
+    }
+}
+EOF
+
+# 创建需要的 NGNX.CONF
+cp /etc/nginx/nginx.conf /etc/nginx/nginx.conf.backup
+cat > /etc/nginx/nginx.conf <<'ENDOFFILE'
+user nginx nginx;
+worker_processes 4;
+
+events {
+  worker_connections 8096;
+  multi_accept on;
+  use epoll;
+}
+
+pid /var/run/nginx.pid;
+worker_rlimit_nofile 40000;
+
+http {
+  server_tokens off;
+  server_names_hash_bucket_size 128;
+  client_max_body_size 1024M;
+  include /etc/nginx/mime.types;
+  default_type application/octet-stream;
+  log_format main '$remote_addr - $remote_user [$time_local] "$request" '
+  '$status $body_bytes_sent "$http_referer" '
+  '"$http_user_agent" "$http_x_forwarded_for"';
+  access_log /var/log/nginx/access.log main;
+  error_log /var/log/nginx/error.log warn;
+  sendfile on;
+  tcp_nopush on;
+  tcp_nodelay on;
+  client_body_timeout 12;
+  client_header_timeout 12;
+  keepalive_timeout 15;
+  send_timeout 10;
+  # Fully disabled gzip compression to mitigate Django BREACH attack: https://www.djangoproject.com/weblog/2013/aug/06/breach-and-django/
+  gzip off;
+  #gzip_vary on;
+  #gzip_proxied expired no-cache no-store private auth any;
+  #gzip_comp_level 9;
+  #gzip_min_length 10240;
+  #gzip_buffers 16 8k;
+  #gzip_http_version 1.1;
+  #gzip_types text/plain text/css text/xml text/javascript application/javascript application/x-javascript application/xml font/woff2;
+  #gzip_disable "MSIE [1-6].";
+  include /etc/nginx/conf.d/*.conf;
+}
+ENDOFFILE
+systemctl restart nginx
+
+# -------------------------------------------
+# 数据库 MariaDB
+# -------------------------------------------
+if [[ -f "/root/.my.cnf" ]] ;
+then
+    echo "MariaDB installed before, skip this part"
+    SQLROOTPW=`sed -n 's/password=//p' /root/.my.cnf`
+else
+    yum install mariadb-server -y
+    systemctl start mariadb
+    systemctl enable mariadb
+
+    SQLROOTPW=$(pwgen)
+
+    mysqladmin -u root password $SQLROOTPW
+
+    cat > /root/.my.cnf <<EOF
+[client]
+user=root
+password=$SQLROOTPW
+EOF
+
+  chmod 600 /root/.my.cnf
+fi
+
+
+# -------------------------------------------
+# Seafile 初始化脚本
+# -------------------------------------------
+cat > /etc/systemd/system/seafile.service <<'EOF'
+[Unit]
+Description=Seafile Server
+After=network.target mariadb.service
+
+[Service]
+Type=oneshot
+ExecStart=/opt/seafile/seafile-server-latest/seafile.sh start
+ExecStop=/opt/seafile/seafile-server-latest/seafile.sh stop
+RemainAfterExit=yes
+User=root
+Group=root
+
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl enable seafile
+
+cat > /etc/systemd/system/seahub.service <<'EOF'
+[Unit]
+Description=Seafile Seahub
+After=network.target seafile.service
+
+[Service]
+ExecStart=/opt/seafile/seafile-server-latest/seahub.sh start 8000
+ExecStop=/opt/seafile/seafile-server-latest/seahub.sh stop
+User=root
+Group=root
+Type=oneshot
+RemainAfterExit=yes
+
+[Install]
+WantedBy=multi-user.target
+EOF
+systemctl enable seahub
+
+# Seafile 重新启动脚本
+cat > /usr/local/sbin/seafile-server-restart << 'EOF'
+#!/bin/bash
+for ACTION in stop start ; do
+    for SERVICE in seafile seahub ; do
+      systemctl ${ACTION} ${SERVICE}
+    done
+done
+EOF
+chmod 700 /usr/local/sbin/seafile-server-restart
+
+# -------------------------------------------
+# Seafile
+# -------------------------------------------
+mkdir -p /opt/seafile/installed
+cd /opt/seafile/
+if ! is_pro && [[ ! -e /opt/${SEAFILE_SERVER_PACKAGE} ]]; then
+    curl -OL ${SEAFILE_SERVER_PACKAGE_URL}
+else
+    cp /opt/${SEAFILE_SERVER_PACKAGE} .
+fi
+tar xzf ${SEAFILE_SERVER_PACKAGE}
+
+mv ${SEAFILE_SERVER_PACKAGE} installed
+
+
+# -------------------------------------------
+# Seafile DB
+# -------------------------------------------
+if [[ -f "/opt/seafile.my.cnf" ]] ;
+then
+  echo "MariaDB installed before, skip this part"
+  SQLSEAFILEPW=`sed -n 's/password=//p' /opt/seafile.my.cnf`
+else
+  SQLSEAFILEPW=$(pwgen)
+
+  cat > /opt/seafile.my.cnf <<EOF
+[client]
+user=seafile
+password=$SQLSEAFILEPW
+EOF
+
+  chmod 600 /opt/seafile.my.cnf
+fi
+
+# -------------------------------------------
+# 进入 /opt/seafile/seafile-pro-server-${SEAFILE_VERSION}
+# -------------------------------------------
+cd $INSTALLPATH
+
+# -------------------------------------------
+# 除非你真的知道自己在做什么，否则不要碰这些东西！
+# -------------------------------------------
+TOPDIR=$(dirname "${INSTALLPATH}")
+DEFAULT_CONF_DIR=${TOPDIR}/conf
+SEAFILE_DATA_DIR=${TOPDIR}/seafile-data
+DEST_SETTINGS_PY=${TOPDIR}/conf/seahub_settings.py
+
+mkdir -p ${DEFAULT_CONF_DIR}
+
+# -------------------------------------------
+# 创建 ccnet, seafile, seahub conf 脚本
+# -------------------------------------------
+
+./setup-seafile-mysql.sh auto -u seafile -w ${SQLSEAFILEPW} -r ${SQLROOTPW}
+
+# -------------------------------------------
+# 配置 Seafile WebDAV 服务器(SeafDAV)
+# -------------------------------------------
+sed -i 's/enabled = .*/enabled = true/' ${DEFAULT_CONF_DIR}/seafdav.conf
+sed -i 's/fastcgi = .*/fastcgi = true/' ${DEFAULT_CONF_DIR}/seafdav.conf
+sed -i 's/share_name = .*/share_name = \/seafdav/' ${DEFAULT_CONF_DIR}/seafdav.conf
+
+# -------------------------------------------
+# 配置 seahub
+# -------------------------------------------
+cat >> ${DEST_SETTINGS_PY} <<EOF
+
+CACHES = {
+    'default': {
+        'BACKEND': 'django_pylibmc.memcached.PyLibMCCache',
+    'LOCATION': '127.0.0.1:11211',
+    }
+}
+
+# EMAIL_USE_TLS                       = False
+# EMAIL_HOST                          = 'localhost'
+# EMAIL_HOST_USER                     = ''
+# EMAIL_HOST_PASSWORD                 = ''
+# EMAIL_PORT                          = '25'
+# DEFAULT_FROM_EMAIL                  = EMAIL_HOST_USER
+# SERVER_EMAIL                        = EMAIL_HOST_USER
+
+TIME_ZONE                           = '${TIME_ZONE}'
+SITE_BASE                           = 'http://${IP_OR_DOMAIN}'
+SITE_NAME                           = 'Seafile Server'
+SITE_TITLE                          = 'Seafile Server'
+SITE_ROOT                           = '/'
+ENABLE_SIGNUP                       = False
+ACTIVATE_AFTER_REGISTRATION         = False
+SEND_EMAIL_ON_ADDING_SYSTEM_MEMBER  = True
+SEND_EMAIL_ON_RESETTING_USER_PASSWD = True
+CLOUD_MODE                          = False
+FILE_PREVIEW_MAX_SIZE               = 30 * 1024 * 1024
+SESSION_COOKIE_AGE                  = 60 * 60 * 24 * 7 * 2
+SESSION_SAVE_EVERY_REQUEST          = False
+SESSION_EXPIRE_AT_BROWSER_CLOSE     = False
+
+FILE_SERVER_ROOT                    = 'http://${IP_OR_DOMAIN}/seafhttp'
+EOF
+
+
+# -------------------------------------------
+# 备份更改
+# -------------------------------------------
+cp ${INSTALLPATH}/check_init_admin.py ${INSTALLPATH}/check_init_admin.py.backup
+
+
+# -------------------------------------------
+# 设置管理员信息
+# -------------------------------------------
+SEAFILE_ADMIN_PW=$(pwgen)
+eval "sed -i 's/= ask_admin_email()/= \"${SEAFILE_ADMIN}\"/' ${INSTALLPATH}/check_init_admin.py"
+eval "sed -i 's/= ask_admin_password()/= \"${SEAFILE_ADMIN_PW}\"/' ${INSTALLPATH}/check_init_admin.py"
+
+# -------------------------------------------
+# 启动和停止 Seafile 系统. 这将生成初始管理用户。
+# -------------------------------------------
+${INSTALLPATH}/seafile.sh start
+${INSTALLPATH}/seahub.sh start
+sleep 2                         # sleep for a while, otherwise seahub will not be stopped
+${INSTALLPATH}/seahub.sh stop
+sleep 1
+${INSTALLPATH}/seafile.sh stop
+
+
+# -------------------------------------------
+# 恢复原始检查
+# -------------------------------------------
+mv ${INSTALLPATH}/check_init_admin.py.backup ${INSTALLPATH}/check_init_admin.py
+
+if is_pro; then
+    PRO_PY=${INSTALLPATH}/pro/pro.py
+    $PYTHON ${PRO_PY} setup --mysql --mysql_host=127.0.0.1 --mysql_port=3306 --mysql_user=seafile --mysql_password=${SQLSEAFILEPW} --mysql_db=seahub_db
+    sed -i 's/enabled = false/enabled = true/' ${TOPDIR}/conf/seafevents.conf
+fi
+
+# -------------------------------------------
+# 重启 seafile 服务
+# -------------------------------------------
+/usr/local/sbin/seafile-server-restart
+
+# -------------------------------------------
+# 最终报告
+# -------------------------------------------
+cat > ${TOPDIR}/aio_seafile-server.log<<EOF
+
+  ★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★★
+  Your Seafile server is installed（您的Seafile服务器已安装）
+  -----------------------------------------------------------------
+
+  Server Address（服务器地址）:      http://${IP_OR_DOMAIN}
+
+  Seafile Admin (管理员用户名):       ${SEAFILE_ADMIN}
+  Admin Password（管理员密码）:      ${SEAFILE_ADMIN_PW}
+
+  Seafile Data Dir (数据目录) :    ${SEAFILE_DATA_DIR}
+
+  Seafile DB Credentials(数据库凭证):  Check /opt/seafile.my.cnf
+  Root DB Credentials(数据库凭证):     Check /root/.my.cnf
+
+  此报告也保存到 ${TOPDIR}/aio_seafile-server.log
+
+
+
+  接下来，您应该手动完成以下步骤
+  -----------------------------------------------------------------
+
+  1) 登录到Seafile，并通过系统管理员账号配置服务器
+
+  2) 如果此服务器位于防火墙后面，则需要确保 TCP端口80打开。
+
+  3) SeaHub试图通过本地服务器发送电子邮件。安装和将此后缀配置或 查看
+     HTTPS://Malual.WaveL.COM/CONTION/SEDENGION EMAIL.HTML
+     有关如何通过SMTP使用现有电子邮件帐户的说明。
+
+
+
+
+  可选步骤
+  -----------------------------------------------------------------
+
+  1) 检查SeaHubbStaysP.Py并定制它以满足您的需要。查阅
+     http://manual.seafile.com/config/seahub_settings_py.html
+
+  2) 用官方SSL证书设置NGIX。
+
+  3) 基于IPTABLE防火墙的安全服务器。例如: UFW 或者 shorewall
+
+  4) 硬件接口及故障排除系统.
+
+  5) 启用无人值守安装安全更新。查看
+     https://wiki.Ubuntu.org/UnattendedUpgrades
+
+  6) 为您的Seafile服务器做好备份
+
+  7) 更新NGNX工作流程以反映CPU内核的数量。
+
+
+
+
+  Seafile 支持选项
+  -----------------------------------------------------------------
+
+  免费社区支持访问:   https://bbs.seafile.com
+  有偿商业支持访问:   https://seafile.com
+
+EOF
+
+chmod 600 ${TOPDIR}/aio_seafile-server.log
+
+clear
+
+cat ${TOPDIR}/aio_seafile-server.log
